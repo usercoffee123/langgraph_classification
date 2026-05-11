@@ -1,0 +1,11 @@
+langchain
+langgraph
+langchain-openai
+langchain-community
+langchain-chroma
+chromadb
+GitPython
+rank-bm25
+psycopg[binary]
+pgvector
+python-dotenv
