@@ -1,4 +1,4 @@
-"""Local vehicle detection and deterministic parking occupancy calculations."""
+"""Local vehicle and person detection and deterministic parking occupancy calculations."""
 
 import math
 from io import BytesIO
@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import TypedDict
 
 VEHICLE_CLASSES = ('car', 'truck', 'bus', 'motorcycle')
+DETECTION_CLASSES = (*VEHICLE_CLASSES, 'person')
+DESCRIPTION_CLASSES = ('car', 'person')
 
 
 class Detection(TypedDict):
@@ -15,8 +17,9 @@ class Detection(TypedDict):
     xyxy: list[float]
 
 
-class CarDescription(TypedDict):
-    car_id: int
+class ObjectDescription(TypedDict):
+    label: str
+    object_id: int
     detection_index: int
     xyxy: list[int]
     description: str
@@ -28,9 +31,10 @@ class State(TypedDict):
     parking_capacity: int | None
     yolo_model: str
     confidence: float
+    sharpen_crops: bool
     detections: list[Detection]
     counts: dict[str, int]
-    car_descriptions: list[CarDescription]
+    descriptions: list[ObjectDescription]
     total: int
     occupancy: float | None
     answer: str
@@ -41,7 +45,8 @@ class State(TypedDict):
 
 def initial_state(question: str, image_path: str | Path, parking_capacity: int | None = None, *,
                   use_llm: bool = True, model: str = 'claude-sonnet-4-6',
-                  yolo_model: str = 'yolo26x.pt', confidence: float = 0.25) -> State:
+                  yolo_model: str = 'yolo26x.pt', confidence: float = 0.25,
+                  sharpen_crops: bool = False) -> State:
     if not question.strip():
         raise ValueError('Enter a nonempty question.')
     if parking_capacity is not None and (isinstance(parking_capacity, bool) or not isinstance(parking_capacity, int) or parking_capacity < 1):
@@ -54,7 +59,7 @@ def initial_state(question: str, image_path: str | Path, parking_capacity: int |
     if path.suffix.lower() not in {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}:
         raise ValueError('Provide a local JPG, PNG, BMP, WebP, or TIFF image.')
     return State(question=question.strip(), image_path=str(path), parking_capacity=parking_capacity,
-                 yolo_model=yolo_model, confidence=confidence, detections=[], counts={}, car_descriptions=[],
+                 yolo_model=yolo_model, confidence=confidence, sharpen_crops=sharpen_crops, detections=[], counts={}, descriptions=[],
                  total=0, occupancy=None, answer='', trace=[], use_llm=use_llm, model=model)
 
 
@@ -65,7 +70,7 @@ def load_yolo(weights: str):
     return YOLO(weights)
 
 
-def detect_vehicles(state: State) -> dict:
+def detect_objects(state: State) -> dict:
     try:
         # Decode explicitly: only a local still image is passed to the detector.
         from PIL import Image, ImageOps
@@ -77,7 +82,7 @@ def detect_vehicles(state: State) -> dict:
         if result.boxes is None:
             raise ValueError('The selected model does not return detection boxes.')
         detections = []
-        counts = dict.fromkeys(VEHICLE_CLASSES, 0)
+        counts = dict.fromkeys(DETECTION_CLASSES, 0)
         for cls, confidence, xyxy in zip(result.boxes.cls.tolist(), result.boxes.conf.tolist(),
                                          result.boxes.xyxy.tolist(), strict=True):
             label = result.names[int(cls)]
@@ -88,53 +93,65 @@ def detect_vehicles(state: State) -> dict:
     except Exception as error:
         raise RuntimeError(f'Local YOLO detection failed: {error}') from error
     return {'detections': detections, 'counts': counts,
-            'trace': [*state['trace'], f'YOLO: detected {sum(counts.values())} vehicle(s) locally']}
+            'trace': [*state['trace'], f'YOLO: detected {sum(counts.values())} vehicle/person detection(s) locally']}
 
 
-def describe_cars(state: State) -> dict:
-    """Crop each YOLO car box locally, then ask Claude to describe that crop."""
-    cars = [(index, detection) for index, detection in enumerate(state['detections'])
-            if detection['label'] == 'car']
-    if not state['use_llm'] or not cars:
-        reason = 'offline mode' if not state['use_llm'] else 'no cars detected'
-        return {'car_descriptions': [],
-                'trace': [*state['trace'], f'Skip car descriptions: {reason}']}
+def describe_detections(state: State) -> dict:
+    """Describe each detected car or person using only its cropped image."""
+    objects = [(index, detection) for index, detection in enumerate(state['detections'])
+            if detection['label'] in DESCRIPTION_CLASSES]
+    if not state['use_llm'] or not objects:
+        reason = 'offline mode' if not state['use_llm'] else 'no cars or people detected'
+        return {'descriptions': [],
+                'trace': [*state['trace'], f'Skip object descriptions: {reason}']}
 
-    from PIL import Image, ImageOps
-    from claude import describe_car
+    from PIL import Image, ImageOps, ImageFilter
+    from claude import describe_object
 
     descriptions = []
     try:
         # Use the same EXIF orientation as detection so coordinates match.
         with Image.open(state['image_path']) as source:
             image = ImageOps.exif_transpose(source).convert('RGB')
-        for car_id, (index, detection) in enumerate(cars, start=1):
+        ids = dict.fromkeys(DESCRIPTION_CLASSES, 0)
+        for index, detection in objects:
+            label = detection['label']
+            ids[label] += 1
+            object_id = ids[label]
             box = detection['xyxy']
             if len(box) != 4 or not all(math.isfinite(value) for value in box):
-                raise ValueError(f'Invalid bounding box for car {car_id}.')
+                raise ValueError(f'Invalid bounding box for {label} {object_id}.')
             x1, y1, x2, y2 = box
             if x2 <= x1 or y2 <= y1:
-                raise ValueError(f'Invalid bounding box for car {car_id}.')
+                raise ValueError(f'Invalid bounding box for {label} {object_id}.')
             bounds = [max(0, math.floor(x1)), max(0, math.floor(y1)),
                       min(image.width, math.ceil(x2)), min(image.height, math.ceil(y2))]
             if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
-                raise ValueError(f'Bounding box for car {car_id} is outside the image.')
+                raise ValueError(f'Bounding box for {label} {object_id} is outside the image.')
             crop = image.crop(tuple(bounds))
             crop.thumbnail((768, 768), Image.Resampling.LANCZOS)
             buffer = BytesIO()
             crop.save(buffer, format='JPEG', quality=85)
-            description = describe_car(buffer.getvalue(), state['model'])
-            descriptions.append(CarDescription(car_id=car_id, detection_index=index,
+            sharpened_jpeg = None
+            if state.get('sharpen_crops', False):
+                # Mild local sharpening; keep the original crop for comparison.
+                sharpened = crop.filter(ImageFilter.UnsharpMask(radius=1.2, percent=125, threshold=3))
+                enhanced_buffer = BytesIO()
+                sharpened.save(enhanced_buffer, format='JPEG', quality=85)
+                sharpened_jpeg = enhanced_buffer.getvalue()
+            description = describe_object(buffer.getvalue(), state['model'], label,
+                                          sharpened_jpeg=sharpened_jpeg)
+            descriptions.append(ObjectDescription(label=label, object_id=object_id, detection_index=index,
                                                xyxy=bounds, description=description))
     except (OSError, ValueError, RuntimeError) as error:
-        raise RuntimeError(f'Car description failed: {error}') from error
-    return {'car_descriptions': descriptions,
-            'trace': [*state['trace'], f'Claude described {len(descriptions)} car crop(s)']}
+        raise RuntimeError(f'Object description failed: {error}') from error
+    return {'descriptions': descriptions,
+            'trace': [*state['trace'], f'Claude described {len(descriptions)} car/person crop(s)']}
 
 
 def calculate_occupancy(state: State) -> dict:
     capacity = state['parking_capacity']
-    total = sum(state['counts'].values())
+    total = sum(state['counts'].get(label, 0) for label in VEHICLE_CLASSES)
     if capacity is None:
         return {'total': total, 'occupancy': None,
                 'trace': [*state['trace'], 'Occupancy unknown: no parking capacity supplied']}
@@ -148,9 +165,9 @@ def calculate_occupancy(state: State) -> dict:
 def statistics(state: State) -> dict:
     """Summary evidence: statistics and description text, without paths or boxes."""
     evidence = {key: state[key] for key in ('counts', 'total', 'parking_capacity', 'occupancy')}
-    evidence['car_descriptions'] = [
-        {'car_id': car['car_id'], 'description': car['description']}
-        for car in state['car_descriptions']
+    evidence['descriptions'] = [
+        {'label': item['label'], 'object_id': item['object_id'], 'description': item['description']}
+        for item in state['descriptions']
     ]
     return evidence
 
@@ -162,7 +179,7 @@ def explain(state: State) -> dict:
         event = 'Claude explains the calculated statistics'
     else:
         counts = ', '.join(f'{name}: {count}' for name, count in state['counts'].items())
-        text = f"Detected vehicles: {counts}. Total detected: {state['total']}.\n"
+        text = f"Detections: {counts}. Total vehicles: {state['total']}.\n"
         if state['occupancy'] is None:
             text += 'Occupancy unknown: parking capacity was not supplied.\n'
         else:
@@ -174,7 +191,13 @@ def explain(state: State) -> dict:
                  'Dense scenes and occluded vehicles can cause severe undercounting. '
                  'These statistics alone cannot establish how crowded the lot is.')
         event = 'Return local statistics without Claude'
-    if state['car_descriptions']:
-        details = [f"Car {car['car_id']}: {car['description']}" for car in state['car_descriptions']]
-        text += '\n\nCar descriptions:\n' + '\n'.join(details)
+    if state['use_llm']:
+        for label, heading in (('person', 'People descriptions'), ('car', 'Car descriptions')):
+            items = [item for item in state['descriptions'] if item['label'] == label]
+            if items:
+                details = [f"{label.capitalize()} {item['object_id']}: {item['description']}"
+                           for item in items]
+                text += f'\n\n{heading}:\n' + '\n'.join(details)
+            elif label == 'person' and state['counts'].get('person', 0) == 0:
+                text += '\n\nPeople descriptions:\nNo people detected.'
     return {'answer': text, 'trace': [*state['trace'], event]}

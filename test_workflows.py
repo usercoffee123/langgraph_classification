@@ -32,10 +32,10 @@ class WorkflowTests(unittest.TestCase):
         load.return_value.predict.return_value = [detector_result([0] * 37 + [1] * 4 + [2, 4])]
         state = self.state()
         graph = run(state)
-        self.assertEqual(graph['counts'], {'car': 37, 'truck': 4, 'bus': 1, 'motorcycle': 0})
+        self.assertEqual(graph['counts'], {'car': 37, 'truck': 4, 'bus': 1, 'motorcycle': 0, 'person': 1})
         self.assertEqual(graph['total'], 42)
         self.assertEqual(graph['occupancy'], 84)
-        self.assertEqual(len(graph['detections']), 42)
+        self.assertEqual(len(graph['detections']), 43)
         self.assertEqual(graph['detections'][0], {'label': 'car', 'confidence': 0.94, 'xyxy': [1, 2, 3, 4]})
         self.assertEqual(len(graph['trace']), 4)
         self.assertEqual(state['counts'], {})
@@ -60,6 +60,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result['counts']['car'], 0)
         self.assertEqual(result['counts']['motorcycle'], 1)
         self.assertEqual(load.return_value.predict.call_args.kwargs['conf'], 0.5)
+
+    @patch('steps.load_yolo')
+    @patch('claude.ChatAnthropic')
+    def test_people_only_offline_have_zero_vehicle_occupancy(self, claude, load):
+        load.return_value.predict.return_value = [detector_result([4, 4])]
+        result = run(self.state())
+        self.assertEqual(result['counts']['person'], 2)
+        self.assertEqual(result['total'], 0)
+        self.assertEqual(result['occupancy'], 0)
+        self.assertIn('person: 2', result['answer'])
+        claude.assert_not_called()
 
     def test_over_capacity_is_not_clamped(self):
         state = self.state()

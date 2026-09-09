@@ -1,4 +1,4 @@
-"""Analyze a local parking-lot image with YOLO, LangGraph, and Claude."""
+"""Detect and describe cars and people in a local parking-lot image with YOLO, LangGraph, and Claude."""
 
 import argparse
 import os
@@ -13,17 +13,20 @@ from steps import initial_state
 def main() -> None:
     load_dotenv(Path(__file__).parent / '.env', override=False)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('question', nargs='?', default='How crowded is this parking lot?')
+    parser.add_argument('question', nargs='?', default='Describe the cars and people in this parking lot.')
     parser.add_argument('--image', type=Path, required=True, help='Local parking-lot image')
     parser.add_argument('--capacity', type=int, help='Known number of spaces in the pictured lot; omit if unknown')
     parser.add_argument('--confidence', type=float, default=0.25, help='YOLO confidence threshold (0, 1]')
     parser.add_argument('--yolo-model', default='yolo26x.pt', help='YOLO detection weights')
     parser.add_argument('--offline', action='store_true', help='Return local statistics without calling Claude; YOLO weights must be cached')
+    parser.add_argument('--sharpen-crops', action='store_true',
+                        help='Send original and mildly sharpened crops to Claude')
     parser.add_argument('--model', default=os.getenv('ANTHROPIC_MODEL') or 'claude-sonnet-4-6')
     args = parser.parse_args()
     try:
         state = initial_state(args.question, args.image, args.capacity, use_llm=not args.offline,
-                              model=args.model, yolo_model=args.yolo_model, confidence=args.confidence)
+                              model=args.model, yolo_model=args.yolo_model, confidence=args.confidence,
+                              sharpen_crops=args.sharpen_crops)
         if args.offline and not Path(args.yolo_model).is_file():
             raise ValueError('--offline requires existing local YOLO weights; pass --yolo-model /path/to/weights.pt.')
     except ValueError as error:
