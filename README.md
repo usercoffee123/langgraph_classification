@@ -3,12 +3,23 @@
 Run commands from this repository root. A single LangGraph workflow processes a local image:
 
 ```text
-START → local YOLO detection → Python calculation → Claude explanation → END
+START → detect → describe_cars → calculate → explain → END
 ```
 
 YOLO records vehicle classes, confidence scores, and bounding boxes locally.
-Python counts cars, trucks, buses, and motorcycles. Claude receives only the
-question and aggregate statistics; the image, path, and boxes remain local.
+The `describe_cars` node crops each detection labeled `car` using its bounding box
+and sends that crop to Claude for a short visual description. Crops are JPEGs,
+resized to at most 768 pixels per side; the full image and local paths are not sent.
+Anything visible inside a car's bounding box is included in its crop.
+
+Python then counts cars, trucks, buses, and motorcycles. The final `explain` node
+requests a summary using statistics and description text, then appends every car description. Each description
+in state includes a car ID, a zero-based detection index, and the crop's pixel bounds
+in the EXIF-oriented image. Trucks, buses, and motorcycles are counted but not described.
+
+Online runs make one vision request per detected car plus one summary request.
+`--offline` skips all Claude requests, including descriptions. No car detections
+means no vision requests. A failed vision request stops the run with an error.
 
 ## Run
 
@@ -55,11 +66,11 @@ uv run python demo.py --image sample_images/parking_easy.jpg --offline --yolo-mo
 ## Files
 
 - `demo.py`: command-line entry point and environment loading.
-- `graph.py`: LangGraph state graph with detect, calculate, and explain nodes.
-- `steps.py`: state, local detection, calculations, and explanation node.
-- `claude.py`: ChatAnthropic call using aggregate statistics.
+- `graph.py`: LangGraph state graph with detect, describe_cars, calculate, and explain nodes.
+- `steps.py`: state, local detection, car crops, calculations, and explanation nodes.
+- `claude.py`: ChatAnthropic calls for car images and aggregate statistics.
 - `sample_images/`: sample photograph and attribution.
-- `test_workflows.py`, `test_claude.py`, `test_cli.py`: graph, model-integration,
+- `test_workflows.py`, `test_claude.py`, `test_car_descriptions.py`, `test_cli.py`: graph, model-integration,
   and command-line tests.
 
 ChatAnthropic and LangChain Core provide the Claude model adapter and message
@@ -78,7 +89,10 @@ this case. The current YOLO26x default detected 29 cars at size 640 and confiden
 0.25 on the same image, which still visibly undercounts it. Its actual capacity
 is unknown; do not use 50 for this sample.
 
-Claude cannot recover missing detections because it receives only statistics.
+Claude cannot recover missing detections because it sees only detected car crops
+and aggregate statistics, not the full scene. Visual descriptions can also be
+wrong; the prompt asks for visible color, body style, and features without guessing
+make, model, or year.
 It is instructed not to infer crowdedness or available spaces. Reliable occupancy
 requires validated detections and capacity for the same pictured area, or a
 parking-space occupancy detector. This example has no space segmentation, lot
@@ -92,4 +106,6 @@ uv run python -m unittest -v
 
 Tests run the actual LangGraph and local image decoding with mocked YOLO and
 Claude. They check filtering, arithmetic, unknown capacity, input validation,
-failure handling, and the data sent to Claude. No API key or weights are needed.
+failure handling, EXIF orientation, crop bounds, per-car descriptions, and the data sent to Claude. No API key or weights are needed.
+
+Vision payload reference: [Claude image inputs](https://platform.claude.com/docs/en/build-with-claude/vision).

@@ -1,5 +1,7 @@
 """Local vehicle detection and deterministic parking occupancy calculations."""
 
+import math
+from io import BytesIO
 from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
@@ -13,6 +15,13 @@ class Detection(TypedDict):
     xyxy: list[float]
 
 
+class CarDescription(TypedDict):
+    car_id: int
+    detection_index: int
+    xyxy: list[int]
+    description: str
+
+
 class State(TypedDict):
     question: str
     image_path: str
@@ -21,6 +30,7 @@ class State(TypedDict):
     confidence: float
     detections: list[Detection]
     counts: dict[str, int]
+    car_descriptions: list[CarDescription]
     total: int
     occupancy: float | None
     answer: str
@@ -44,7 +54,7 @@ def initial_state(question: str, image_path: str | Path, parking_capacity: int |
     if path.suffix.lower() not in {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}:
         raise ValueError('Provide a local JPG, PNG, BMP, WebP, or TIFF image.')
     return State(question=question.strip(), image_path=str(path), parking_capacity=parking_capacity,
-                 yolo_model=yolo_model, confidence=confidence, detections=[], counts={},
+                 yolo_model=yolo_model, confidence=confidence, detections=[], counts={}, car_descriptions=[],
                  total=0, occupancy=None, answer='', trace=[], use_llm=use_llm, model=model)
 
 
@@ -81,6 +91,47 @@ def detect_vehicles(state: State) -> dict:
             'trace': [*state['trace'], f'YOLO: detected {sum(counts.values())} vehicle(s) locally']}
 
 
+def describe_cars(state: State) -> dict:
+    """Crop each YOLO car box locally, then ask Claude to describe that crop."""
+    cars = [(index, detection) for index, detection in enumerate(state['detections'])
+            if detection['label'] == 'car']
+    if not state['use_llm'] or not cars:
+        reason = 'offline mode' if not state['use_llm'] else 'no cars detected'
+        return {'car_descriptions': [],
+                'trace': [*state['trace'], f'Skip car descriptions: {reason}']}
+
+    from PIL import Image, ImageOps
+    from claude import describe_car
+
+    descriptions = []
+    try:
+        # Use the same EXIF orientation as detection so coordinates match.
+        with Image.open(state['image_path']) as source:
+            image = ImageOps.exif_transpose(source).convert('RGB')
+        for car_id, (index, detection) in enumerate(cars, start=1):
+            box = detection['xyxy']
+            if len(box) != 4 or not all(math.isfinite(value) for value in box):
+                raise ValueError(f'Invalid bounding box for car {car_id}.')
+            x1, y1, x2, y2 = box
+            if x2 <= x1 or y2 <= y1:
+                raise ValueError(f'Invalid bounding box for car {car_id}.')
+            bounds = [max(0, math.floor(x1)), max(0, math.floor(y1)),
+                      min(image.width, math.ceil(x2)), min(image.height, math.ceil(y2))]
+            if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+                raise ValueError(f'Bounding box for car {car_id} is outside the image.')
+            crop = image.crop(tuple(bounds))
+            crop.thumbnail((768, 768), Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            crop.save(buffer, format='JPEG', quality=85)
+            description = describe_car(buffer.getvalue(), state['model'])
+            descriptions.append(CarDescription(car_id=car_id, detection_index=index,
+                                               xyxy=bounds, description=description))
+    except (OSError, ValueError, RuntimeError) as error:
+        raise RuntimeError(f'Car description failed: {error}') from error
+    return {'car_descriptions': descriptions,
+            'trace': [*state['trace'], f'Claude described {len(descriptions)} car crop(s)']}
+
+
 def calculate_occupancy(state: State) -> dict:
     capacity = state['parking_capacity']
     total = sum(state['counts'].values())
@@ -95,8 +146,13 @@ def calculate_occupancy(state: State) -> dict:
 
 
 def statistics(state: State) -> dict:
-    """Explicit allowlist of evidence sent to Claude; no image, path, or boxes."""
-    return {key: state[key] for key in ('counts', 'total', 'parking_capacity', 'occupancy')}
+    """Summary evidence: statistics and description text, without paths or boxes."""
+    evidence = {key: state[key] for key in ('counts', 'total', 'parking_capacity', 'occupancy')}
+    evidence['car_descriptions'] = [
+        {'car_id': car['car_id'], 'description': car['description']}
+        for car in state['car_descriptions']
+    ]
+    return evidence
 
 
 def explain(state: State) -> dict:
@@ -118,4 +174,7 @@ def explain(state: State) -> dict:
                  'Dense scenes and occluded vehicles can cause severe undercounting. '
                  'These statistics alone cannot establish how crowded the lot is.')
         event = 'Return local statistics without Claude'
+    if state['car_descriptions']:
+        details = [f"Car {car['car_id']}: {car['description']}" for car in state['car_descriptions']]
+        text += '\n\nCar descriptions:\n' + '\n'.join(details)
     return {'answer': text, 'trace': [*state['trace'], event]}

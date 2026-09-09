@@ -37,7 +37,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(graph['occupancy'], 84)
         self.assertEqual(len(graph['detections']), 42)
         self.assertEqual(graph['detections'][0], {'label': 'car', 'confidence': 0.94, 'xyxy': [1, 2, 3, 4]})
-        self.assertEqual(len(graph['trace']), 3)
+        self.assertEqual(len(graph['trace']), 4)
         self.assertEqual(state['counts'], {})
         self.assertEqual(state['trace'], [])
         self.assertIsInstance(load.return_value.predict.call_args.kwargs['source'], Image.Image)
