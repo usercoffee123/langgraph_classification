@@ -1,4 +1,4 @@
-"""Local vehicle and person detection and deterministic parking occupancy calculations."""
+"""Local detection of all model classes and deterministic parking calculations."""
 
 from functools import lru_cache
 from pathlib import Path
@@ -8,7 +8,6 @@ from dino import DEFAULT_DINO_MODEL
 from devices import resolve_device
 
 VEHICLE_CLASSES = ('car', 'truck', 'bus', 'motorcycle')
-DETECTION_CLASSES = (*VEHICLE_CLASSES, 'person')
 
 
 class Detection(TypedDict):
@@ -17,9 +16,15 @@ class Detection(TypedDict):
     xyxy: list[float]
 
 
+class ImageSize(TypedDict):
+    width: int
+    height: int
+
+
 class State(TypedDict):
     question: str
     image_path: str
+    image_size: ImageSize | None
     parking_capacity: int | None
     yolo_model: str
     device: str
@@ -61,7 +66,7 @@ def initial_state(question: str, image_path: str | Path, parking_capacity: int |
         raise ValueError(f'Image file does not exist: {path}')
     if path.suffix.lower() not in {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}:
         raise ValueError('Provide a local JPG, PNG, BMP, WebP, or TIFF image.')
-    return State(question=question.strip(), image_path=str(path), parking_capacity=parking_capacity,
+    return State(question=question.strip(), image_path=str(path), image_size=None, parking_capacity=parking_capacity,
                  yolo_model=yolo_model, device=device, confidence=confidence, detections=[], counts={},
                  total=0, occupancy=None, answer='', trace=[], use_llm=use_llm, model=model,
                  dino_model=dino_model, dino_threshold=dino_threshold,
@@ -88,18 +93,19 @@ def detect_objects(state: State) -> dict:
         if result.boxes is None:
             raise ValueError('The selected model does not return detection boxes.')
         detections = []
-        counts = dict.fromkeys(DETECTION_CLASSES, 0)
+        counts = dict.fromkeys(result.names.values(), 0)
         for cls, confidence, xyxy in zip(result.boxes.cls.tolist(), result.boxes.conf.tolist(),
                                          result.boxes.xyxy.tolist(), strict=True):
             label = result.names[int(cls)]
-            if label in counts and confidence >= state['confidence']:
+            if confidence >= state['confidence']:
                 detections.append(Detection(label=label, confidence=float(confidence),
                                             xyxy=[float(value) for value in xyxy]))
                 counts[label] += 1
     except Exception as error:
         raise RuntimeError(f'Local YOLO detection failed: {error}') from error
     return {'detections': detections, 'counts': counts,
-            'trace': [*state['trace'], f'YOLO ({device}): detected {sum(counts.values())} vehicle/person detection(s) locally']}
+            'image_size': ImageSize(width=image.width, height=image.height),
+            'trace': [*state['trace'], f'YOLO ({device}): detected {sum(counts.values())} object(s) locally']}
 
 
 def calculate_occupancy(state: State) -> dict:
@@ -116,12 +122,23 @@ def calculate_occupancy(state: State) -> dict:
 
 
 def statistics(state: State) -> dict:
-    return {key: state[key] for key in ('counts', 'total', 'parking_capacity', 'occupancy')}
+    """YOLO evidence for the LLM, excluding local paths and configuration."""
+    evidence = {key: state[key] for key in ('counts', 'total', 'parking_capacity', 'occupancy', 'image_size')}
+    evidence['detections'] = [
+        {'label': item['label'], 'confidence': item['confidence'], 'xyxy': list(item['xyxy'])}
+        for item in state['detections']
+    ]
+    return evidence
 
 
 def explain(state: State) -> dict:
-    counts = ', '.join(f'{name}: {count}' for name, count in state['counts'].items())
-    text = f"YOLO detections: {counts}. Total vehicles: {state['total']}."
+    found = [(name, count) for name, count in sorted(state['counts'].items()) if count]
+    text = f'YOLO: {sum(state["counts"].values())} object(s) across {len(found)} detected class(es).'
+    if found:
+        text += '\n' + '\n'.join(f'  {name}: {count}' for name, count in found)
+    else:
+        text += '\nNo objects detected above the configured confidence threshold.'
+    text += f"\nTotal parking vehicles (car, truck, bus, motorcycle): {state['total']}."
     if state['occupancy'] is None:
         text += '\nOccupancy unknown: parking capacity was not supplied.'
     else:

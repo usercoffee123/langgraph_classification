@@ -1,10 +1,29 @@
 # Count objects, then ask about the image
 
-YOLO first reports the number of cars and people in a local image (and separately
-counts trucks, buses, and motorcycles). You can then ask Claude about other objects.
+YOLO first reports counts for every class it detects in a local image. The current
+`yolo26x.pt` weights support 80 classes; custom weights use their own class list.
+All detections above the confidence threshold are retained, including backpacks,
+bicycles, phones, animals, and other supported objects. You can then ask Claude
+about those results or request another search.
 Claude has a `query_objects` tool that runs Grounding DINO locally with a text prompt
 such as `bicycle. backpack.` and returns candidate labels, scores, and pixel boxes.
 There is no automatic weapon scan or per-person/car image-description stage.
+
+```mermaid
+flowchart LR
+    Image["Full local image"] --> YOLO["YOLO: all model classes"]
+    YOLO --> State["Save counts, scores, boxes and image size"]
+    State --> Report["Print counts by detected class"]
+    State --> Claude["Claude: questions and follow-ups"]
+    Claude -->|optional query_objects call| DINO["Local Grounding DINO"]
+    Image --> DINO
+    DINO -->|candidate results| Claude
+```
+
+YOLO runs once per session. Claude receives saved results on every turn; DINO
+searches the **whole image** only when its tool is called. See
+[the architecture diagrams and state reference](ARCHITECTURE.md) for the runtime
+flow, tool-call sequence, local/API boundaries, and offline behavior.
 
 ## Run on your Mac
 
@@ -19,7 +38,21 @@ Set `ANTHROPIC_API_KEY` in `.env` next to `demo.py` to enable questions. On a fr
 checkout, copy `.env.example` to `.env`. Shell variables take precedence.
 `ANTHROPIC_MODEL` or `--model` selects the Claude model.
 
-The terminal prints YOLO counts first, then prompts:
+The terminal prints the total number of detections and a separate count for each
+class found, then prompts. Classes with zero detections remain in state but are
+omitted from the printed class list. If none are found, it prints an explicit
+no-detections message.
+
+For `cctv_carjacking.jpg`, the verified MPS run printed:
+
+```text
+YOLO: 7 object(s) across 3 detected class(es).
+  car: 2
+  person: 3
+  truck: 2
+```
+
+With an API key configured, continue in the same terminal:
 
 ```text
 You> Are there any bicycles?
@@ -29,6 +62,12 @@ You> quit
 ```
 
 Follow-up questions retain the conversation and tool results for this image.
+These results live in memory for the session; they are not saved across restarts.
+State retains YOLO counts and each detection's label, confidence, and pixel box,
+plus the oriented image dimensions. Claude receives these saved results on every
+turn, so it can answer count and location questions for any detected class without
+repeating YOLO. DINO is available for objects YOLO missed, unsupported classes,
+and additional searches you request.
 YOLO runs only once per session. DINO loads only when Claude requests its tool;
 model weights are cached in memory for later queries. Type `quit`, `exit`, Ctrl-D,
 or Ctrl-C at the prompt to finish.
@@ -62,8 +101,8 @@ with `--confidence` (default 0.25). Grounding DINO defaults to
 First use may download missing model files. The former `--weapon-threshold`,
 `--weapon-text-threshold`, and `--sharpen-crops` flags have been removed.
 
-Images stay local. Claude receives questions, YOLO statistics, and DINO query
-results (labels, scores, boxes), not images, crops, local paths, or credentials.
+Images stay local. Claude receives questions, saved YOLO detections and statistics,
+and DINO query results (labels, scores, boxes), not images, crops, local paths, or credentials.
 DINO searches the full EXIF-oriented image and does not receive a path from Claude.
 Tool execution follows [Claude's tool-use protocol](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview).
 

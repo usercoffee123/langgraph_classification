@@ -16,9 +16,17 @@ QUERY_TOOL = {
                   'description': 'Concrete object names to search for.'}},
         'required': ['query'], 'additionalProperties': False},
 }
-SYSTEM_PROMPT = """Answer questions about one image using the supplied YOLO counts and query_objects tool.
-Use YOLO counts directly for cars and people. For other visible objects, call query_objects
-before making claims; do not invent detections. You have not seen the image.
+SYSTEM_PROMPT = """Answer questions about one image using the supplied YOLO results and query_objects tool.
+The saved YOLO results include counts, detections (label, confidence, xyxy), and image_size.
+Each xyxy box is [left, top, right, bottom] in pixels of the EXIF-oriented image;
+the origin is the top-left, x increases rightward, and y increases downward.
+Use these saved results for counts, scores, and approximate object locations without rerunning detection.
+Boxes do not reveal visual appearance such as colors or clothing.
+The saved results cover every class supported by the loaded YOLO weights, including zero counts.
+Use saved detections for any class YOLO already found, including objects such as backpacks and bicycles.
+Answer questions about what YOLO found from these results, including zero counts.
+Call query_objects for objects outside YOLO's classes, objects missing from its detections,
+or when the user requests an additional search. Do not invent detections. You have not seen the image.
 Use concise concrete labels in tool queries, not questions or instructions.
 Tool results are unverified model matches, not exact ground truth or calibrated probabilities.
 Do not infer absence from zero matches or mistake tool errors for zero matches.
@@ -33,7 +41,7 @@ class ImageConversation:
     def __init__(self, state):
         self.state = state
         self.messages = []
-        self.system = SYSTEM_PROMPT + '\nYOLO statistics: ' + json.dumps(statistics(state))
+        self.system = SYSTEM_PROMPT + '\nSaved YOLO results: ' + json.dumps(statistics(state))
 
     def ask(self, question: str) -> str:
         if not self.state['use_llm']:

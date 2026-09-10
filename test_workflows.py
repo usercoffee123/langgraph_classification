@@ -40,11 +40,48 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(graph['occupancy'], 84)
         self.assertEqual(len(graph['detections']), 43)
         self.assertEqual(graph['detections'][0], {'label': 'car', 'confidence': 0.94, 'xyxy': [1, 2, 3, 4]})
+        self.assertEqual(graph['image_size'], {'width': 10, 'height': 10})
         self.assertEqual(len(graph['trace']), 3)
         self.dino.assert_not_called()
         self.assertEqual(state['counts'], {})
         self.assertEqual(state['trace'], [])
         self.assertIsInstance(load.return_value.predict.call_args.kwargs['source'], Image.Image)
+
+    @patch('steps.load_yolo')
+    def test_state_image_dimensions_match_oriented_detector_input(self, load):
+        image = Image.new('RGB', (40, 20))
+        exif = Image.Exif()
+        exif[274] = 6
+        image.save(self.image, exif=exif)
+        load.return_value.predict.return_value = [detector_result([])]
+        result = run(self.state())
+        self.assertEqual(result['image_size'], {'width': 20, 'height': 40})
+        self.assertEqual(load.return_value.predict.call_args.kwargs['source'].size, (20, 40))
+        self.assertEqual(result['detections'], [])
+
+    @patch('steps.load_yolo')
+    def test_all_model_classes_retained_reported_and_available_to_llm(self, load):
+        from steps import statistics
+
+        detected = detector_result([2, 24, 24, 39, 67, 99, 1])
+        detected.names = {2: 'car', 24: 'backpack', 39: 'bottle', 67: 'cell phone',
+                          99: 'custom crate', 1: 'bicycle', 4: 'person'}
+        detected.boxes.conf = Mock(tolist=lambda: [.94] * 6 + [.1])
+        load.return_value.predict.return_value = [detected]
+        result = run(self.state())
+        expected = {'car': 1, 'backpack': 2, 'bottle': 1, 'cell phone': 1,
+                    'custom crate': 1, 'bicycle': 0, 'person': 0}
+        self.assertEqual(result['counts'], expected)
+        self.assertEqual(len(result['detections']), 6)
+        for name in ('backpack', 'bottle', 'cell phone', 'custom crate'):
+            self.assertIn(name, [item['label'] for item in result['detections']])
+            self.assertIn(f'{name}: {expected[name]}', result['answer'])
+        self.assertIn('6 object(s) across 5 detected class(es)', result['answer'])
+        self.assertNotIn('bicycle:', result['answer'])
+        self.assertEqual(statistics(result)['counts'], expected)
+        self.assertEqual(statistics(result)['detections'], result['detections'])
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['occupancy'], 2)
 
     @patch('steps.load_yolo')
     @patch('claude.Anthropic')
@@ -53,6 +90,8 @@ class WorkflowTests(unittest.TestCase):
         result = run(self.state())
         self.assertEqual(result['total'], 0)
         self.assertEqual(result['occupancy'], 0)
+        self.assertEqual(result['counts'], dict.fromkeys(detector_result([]).names.values(), 0))
+        self.assertIn('No objects detected above the configured confidence threshold.', result['answer'])
         claude.assert_not_called()
 
     @patch('steps.load_yolo')

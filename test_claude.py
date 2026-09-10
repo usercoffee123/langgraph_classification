@@ -48,6 +48,35 @@ class ConversationTests(unittest.TestCase):
         self.assertIn('"car": 2', self.chat.system)
 
     @patch('claude.query_objects')
+    @patch('steps.load_yolo')
+    def test_graph_results_reach_llm_on_each_turn_without_rerunning_yolo(self, yolo, query):
+        from graph import run
+        from test_workflows import detector_result
+
+        detected = detector_result([0, 4, 24])
+        detected.names[24] = 'backpack'
+        yolo.return_value.predict.return_value = [detected]
+        state = run(self.state)
+        chat = ImageConversation(state)
+        self.create.side_effect = [response(text('One car.')), response(text('Its box is [1, 2, 3, 4].'))]
+        chat.ask('How many cars?')
+        chat.ask('Where is it?')
+        for call in self.create.call_args_list:
+            system = call.kwargs['system']
+            evidence = json.loads(system.split('\nSaved YOLO results: ', 1)[1])
+            self.assertEqual(evidence['detections'], state['detections'])
+            self.assertEqual(evidence['detections'][0]['confidence'], .94)
+            self.assertEqual(evidence['image_size'], {'width': 20, 'height': 20})
+            self.assertEqual(evidence['counts']['car'], 1)
+            self.assertEqual(evidence['counts']['backpack'], 1)
+            self.assertEqual(evidence['detections'][-1]['label'], 'backpack')
+            self.assertNotIn(state['image_path'], system)
+            self.assertNotIn('image_path', evidence)
+            self.assertNotIn('model', evidence)
+        yolo.return_value.predict.assert_called_once()
+        query.assert_not_called()
+
+    @patch('claude.query_objects')
     def test_tool_round_trip_and_multiple_calls(self, query):
         query.return_value = {'count': 1, 'detections': [{'label': 'bicycle', 'confidence': .8, 'xyxy': [1, 2, 3, 4]}]}
         self.create.side_effect = [response(tool('bicycle'), tool('backpack', 'call2')), response(text('One candidate for each.'))]

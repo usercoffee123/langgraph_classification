@@ -1,4 +1,4 @@
-"""Count cars and people with YOLO, then ask questions using Claude and local Grounding DINO."""
+"""Report every detected YOLO class, then ask questions using Claude and local Grounding DINO."""
 
 import argparse
 import os

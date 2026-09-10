@@ -1,4 +1,9 @@
-# Sample parking-lot image
+# Sample images and attribution
+
+The app reports every detected YOLO class and retains its results for follow-up
+questions. Grounding DINO searches the full image only when Claude requests it.
+Use `--device mps` on an Apple Silicon Mac; add `--offline` for YOLO counts only.
+See [running the app](../README.md) and [architecture](../ARCHITECTURE.md).
 
 ## Clear weapon example: handgun_easy.jpg
 
@@ -72,6 +77,6 @@ Downloaded unchanged for local testing. Source credits WPVI-TV; no open
 redistribution license has been established.
 
 Run: uv run python demo.py --image sample_images/cctv_carjacking.jpg
-Capacity is unknown. YOLO reports vehicle and person counts first. Ask a follow-up
+Capacity is unknown. YOLO reports counts for all detected classes first. Ask a follow-up
 question to search for other objects with the local Grounding DINO tool. Small or
 obscured objects in this CCTV still may be missed. No automatic weapon scan runs.
