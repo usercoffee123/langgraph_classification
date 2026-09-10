@@ -19,7 +19,7 @@ def detector_result(labels):
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        dino = patch('weapons.predict_weapons', return_value=[])
+        dino = patch('dino.predict_objects', return_value=[])
         self.dino = dino.start()
         self.addCleanup(dino.stop)
         self.directory = tempfile.TemporaryDirectory()
@@ -40,7 +40,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(graph['occupancy'], 84)
         self.assertEqual(len(graph['detections']), 43)
         self.assertEqual(graph['detections'][0], {'label': 'car', 'confidence': 0.94, 'xyxy': [1, 2, 3, 4]})
-        self.assertEqual(len(graph['trace']), 5)
+        self.assertEqual(len(graph['trace']), 3)
+        self.dino.assert_not_called()
         self.assertEqual(state['counts'], {})
         self.assertEqual(state['trace'], [])
         self.assertIsInstance(load.return_value.predict.call_args.kwargs['source'], Image.Image)

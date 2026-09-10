@@ -22,8 +22,10 @@ class CLITests(unittest.TestCase):
 
     @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key', 'ANTHROPIC_MODEL': 'test-model'}, clear=True)
     @patch('demo.load_dotenv')
+    @patch('builtins.input', return_value='quit')
+    @patch('demo.ImageConversation')
     @patch('demo.run')
-    def test_default_invokes_graph_once_with_unknown_capacity(self, run, load_env):
+    def test_default_invokes_graph_once_with_unknown_capacity(self, run, conversation, user_input, load_env):
         run.return_value = {'trace': ['Detection completed'], 'answer': 'Occupancy unknown.'}
         output = io.StringIO()
         with patch('sys.argv', ['demo.py', '--image', str(self.image)]), redirect_stdout(output):
@@ -39,8 +41,10 @@ class CLITests(unittest.TestCase):
 
     @patch.dict(os.environ, {}, clear=True)
     @patch('demo.load_dotenv')
+    @patch('builtins.input', return_value='quit')
+    @patch('demo.ImageConversation')
     @patch('demo.run')
-    def test_offline_runs_graph_without_api_key(self, run, load_env):
+    def test_offline_runs_graph_without_api_key(self, run, conversation, user_input, load_env):
         weights = Path(self.directory.name) / 'detector.pt'
         weights.write_bytes(b'test placeholder; graph is mocked')
         run.return_value = {'trace': [], 'answer': 'Local statistics.'}
@@ -52,18 +56,46 @@ class CLITests(unittest.TestCase):
 
     @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}, clear=True)
     @patch('demo.load_dotenv')
+    @patch('builtins.input', return_value='quit')
+    @patch('demo.ImageConversation')
     @patch('demo.run')
-    def test_weapon_options_reach_graph_state(self, run, load_env):
+    def test_dino_options_reach_graph_state(self, run, conversation, user_input, load_env):
         run.return_value = {'trace': [], 'answer': 'Candidates.'}
         args = ['demo.py', '--image', str(self.image), '--dino-model', 'local-dino',
-                '--weapon-threshold', '0.5', '--weapon-text-threshold', '0.3']
+                '--dino-threshold', '0.5', '--dino-text-threshold', '0.3']
         with patch('sys.argv', args), redirect_stdout(io.StringIO()):
             demo.main()
         state = run.call_args.args[0]
         self.assertEqual(state['dino_model'], 'local-dino')
-        self.assertEqual(state['weapon_threshold'], 0.5)
-        self.assertEqual(state['weapon_text_threshold'], 0.3)
-        self.assertEqual(state['weapon_detections'], [])
+        self.assertEqual(state['dino_threshold'], 0.5)
+        self.assertEqual(state['dino_text_threshold'], 0.3)
+
+    @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}, clear=True)
+    @patch('demo.load_dotenv')
+    @patch('builtins.input', side_effect=['Any bicycles?', 'Any backpacks?', 'quit'])
+    @patch('demo.ImageConversation')
+    @patch('demo.run')
+    def test_interactive_followups_reuse_counting_and_conversation(self, run, conversation, user_input, load_env):
+        run.return_value = {'answer': 'car: 2, person: 4'}
+        conversation.return_value.ask.return_value = 'One candidate.'
+        with patch('sys.argv', ['demo.py', '--image', str(self.image)]), redirect_stdout(io.StringIO()):
+            demo.main()
+        run.assert_called_once()
+        conversation.assert_called_once_with(run.return_value)
+        self.assertEqual([call.args[0] for call in conversation.return_value.ask.call_args_list],
+                         ['Any bicycles?', 'Any backpacks?'])
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch('demo.load_dotenv')
+    @patch('demo.ImageConversation')
+    @patch('demo.run')
+    def test_missing_key_still_reports_counts(self, run, conversation, load_env):
+        run.return_value = {'answer': 'car: 2, person: 4'}
+        output = io.StringIO()
+        with patch('sys.argv', ['demo.py', '--image', str(self.image)]), redirect_stdout(output):
+            demo.main()
+        self.assertIn('car: 2, person: 4', output.getvalue())
+        conversation.assert_not_called()
 
 
 if __name__ == '__main__':

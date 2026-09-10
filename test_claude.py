@@ -4,94 +4,89 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from anthropic.types import TextBlock, ToolUseBlock
+from types import SimpleNamespace
 from PIL import Image
-import httpx
-from anthropic import AuthenticationError, RateLimitError, APIConnectionError
-from anthropic.types import Message, TextBlock, ThinkingBlock
 
-
-from graph import run
-from claude import generate_answer
+from claude import ImageConversation
 from steps import initial_state
-from test_workflows import detector_result
 
 
-def response_text(content):
-    return Message(id="test", type="message", role="assistant", model="test-model",
-                   content=[TextBlock(type="text", text=content)],
-                   stop_reason="end_turn", usage={"input_tokens": 1, "output_tokens": 1})
+def response(*blocks):
+    return SimpleNamespace(content=list(blocks), stop_reason='tool_use' if any(b.type == 'tool_use' for b in blocks) else 'end_turn')
 
 
-class ClaudeTests(unittest.TestCase):
+def text(value):
+    return TextBlock(type='text', text=value)
+
+
+def tool(query, id='call1', name='query_objects'):
+    return ToolUseBlock(type='tool_use', id=id, name=name, input={'query': query})
+
+
+class ConversationTests(unittest.TestCase):
     def setUp(self):
-        dino = patch('weapons.predict_weapons', return_value=[])
-        self.dino = dino.start()
-        self.addCleanup(dino.stop)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / 'private.png'
+        Image.new('RGB', (20, 20)).save(path)
+        self.state = initial_state('count', path, device='cpu')
+        self.state['counts'] = {'car': 2, 'person': 4}
+        self.chat = ImageConversation(self.state)
+        p = patch('claude.Anthropic')
+        self.create = p.start().return_value.__enter__.return_value.messages.create
+        self.addCleanup(p.stop)
 
-    @patch('claude.describe_object', return_value='A silver car.')
-    @patch('steps.load_yolo')
-    @patch('claude.Anthropic')
-    def test_summary_receives_only_statistics_and_descriptions_are_displayed(self, model, load, describe):
-        model.return_value.__enter__.return_value.messages.create.return_value = response_text(content='Estimated occupancy is 84%.')
-        load.return_value.predict.return_value = [detector_result([0] * 37 + [1] * 4 + [2])]
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'private-parking.png'
-            Image.new('RGB', (10, 10)).save(path)
-            result = run(initial_state('How crowded?', path, 50))
-            self.assertIn('Estimated occupancy is 84%.', result['answer'])
-            self.assertIn('Car 37: A silver car.', result['answer'])
-            self.assertEqual(describe.call_count, 37)
-        self.assertEqual(model.return_value.__enter__.return_value.messages.create.call_count, 1)
-        for call in model.return_value.__enter__.return_value.messages.create.call_args_list:
-            messages = call.kwargs['messages']
-            payload = json.loads(messages[0]['content'])
-            self.assertEqual(payload, {'question': 'How crowded?', 'statistics': {
-                'weapon_candidates': [],
-                'counts': {'car': 37, 'truck': 4, 'bus': 1, 'motorcycle': 0, 'person': 0},
-                'total': 42, 'parking_capacity': 50, 'occupancy': 84.0,
-                'descriptions': [{'label': 'car', 'object_id': i, 'description': 'A silver car.'}
-                                     for i in range(1, 38)]}})
-            self.assertNotIn('private-parking', str(messages))
-        request = model.return_value.__enter__.return_value.messages.create.call_args.kwargs
-        self.assertEqual(request['temperature'], 0)
-        self.assertEqual(request['max_tokens'], 1200)
-        self.assertEqual(request['messages'][0]['role'], 'user')
-        self.assertIn('parking-lot question', request['system'])
-        model.assert_called_once_with(timeout=60, max_retries=2)
+    @patch('claude.query_objects')
+    def test_counts_need_no_dino_and_followups_preserve_history(self, query):
+        self.create.side_effect = [response(text('2 cars and 4 people.')), response(text('4 people.'))]
+        self.chat.ask('How many cars and people?')
+        self.chat.ask('How many of those are people?')
+        query.assert_not_called()
+        self.assertEqual(len(self.chat.messages), 4)
+        self.assertNotIn('private.png', self.chat.system)
+        self.assertIn('"car": 2', self.chat.system)
 
-    @patch('claude.Anthropic')
-    def test_empty_response(self, model):
-        model.return_value.__enter__.return_value.messages.create.return_value = response_text(content='')
-        with self.assertRaisesRegex(RuntimeError, 'no text'):
-            generate_answer('question', {}, 'test-model')
+    @patch('claude.query_objects')
+    def test_tool_round_trip_and_multiple_calls(self, query):
+        query.return_value = {'count': 1, 'detections': [{'label': 'bicycle', 'confidence': .8, 'xyxy': [1, 2, 3, 4]}]}
+        self.create.side_effect = [response(tool('bicycle'), tool('backpack', 'call2')), response(text('One candidate for each.'))]
+        self.assertEqual(self.chat.ask('Find bicycles and backpacks.'), 'One candidate for each.')
+        self.assertEqual(query.call_args_list[0].args, (self.state, 'bicycle'))
+        results = self.chat.messages[2]['content']
+        self.assertEqual([r['tool_use_id'] for r in results], ['call1', 'call2'])
+        self.assertEqual(json.loads(results[0]['content'])['count'], 1)
+        self.assertEqual(self.create.call_args.kwargs['tools'][0]['name'], 'query_objects')
+        # Bind against the installed SDK signature, not just an unrestricted mock.
+        import inspect
+        from anthropic.resources.messages import Messages
+        inspect.signature(Messages.create).bind(None, **self.create.call_args.kwargs)
 
-    @patch('claude.Anthropic')
-    def test_text_blocks_are_joined_and_other_blocks_ignored(self, model):
-        response = response_text('  First ')
-        response.content.extend([
-            ThinkingBlock(type='thinking', thinking='internal reasoning', signature='test'),
-            TextBlock(type='text', text='second.  '),
-        ])
-        model.return_value.__enter__.return_value.messages.create.return_value = response
-        self.assertEqual(generate_answer('question', {}, 'test-model'), 'First second.')
-        model.return_value.__exit__.assert_called_once()
+    @patch('claude.query_objects', side_effect=RuntimeError('/private/path/model failed'))
+    def test_tool_failure_is_error_not_empty_detections(self, query):
+        self.create.side_effect = [response(tool('bicycle')), response(text('The search failed.'))]
+        self.chat.ask('Any bicycles?')
+        result = self.chat.messages[2]['content'][0]
+        self.assertTrue(result['is_error'])
+        self.assertNotIn('/private/path', result['content'])
 
-    @patch('claude.Anthropic')
-    def test_api_errors_are_readable_and_client_is_closed(self, model):
-        request = httpx.Request('POST', 'https://api.anthropic.com/v1/messages')
-        errors = [
-            (AuthenticationError('bad key', response=httpx.Response(401, request=request), body=None), 'rejected the API key'),
-            (RateLimitError('rate limit', response=httpx.Response(429, request=request), body=None), 'rate limit reached'),
-            (APIConnectionError(request=request), 'API request failed'),
-        ]
-        for error, message in errors:
-            with self.subTest(error=type(error).__name__):
-                model.reset_mock()
-                model.return_value.__enter__.return_value.messages.create.side_effect = error
-                with self.assertRaisesRegex(RuntimeError, message):
-                    generate_answer('question', {}, 'test-model')
-                model.return_value.__exit__.assert_called_once()
+    @patch('claude.query_objects')
+    def test_unknown_tool_not_executed(self, query):
+        self.create.side_effect = [response(tool('bicycle', name='read_file')), response(text('Cannot use that tool.'))]
+        self.chat.ask('Find bicycles.')
+        query.assert_not_called()
+        self.assertTrue(self.chat.messages[2]['content'][0]['is_error'])
 
+    @patch('claude.query_objects', return_value={'count': 0, 'detections': []})
+    def test_repeated_tool_calls_are_bounded_and_failed_turn_not_saved(self, query):
+        self.create.return_value = response(tool('bicycle'))
+        with self.assertRaisesRegex(RuntimeError, 'round limit'):
+            self.chat.ask('Find bicycles.')
+        self.assertEqual(query.call_count, 5)
+        self.assertEqual(self.chat.messages, [])
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_offline_never_calls_claude(self):
+        self.state['use_llm'] = False
+        with self.assertRaisesRegex(ValueError, 'require Claude'):
+            self.chat.ask('Any bicycles?')
+        self.create.assert_not_called()

@@ -10,12 +10,13 @@ https://creativecommons.org/licenses/by-sa/4.0/
 Downloaded unchanged (4272 x 2848 pixels).
 
 A close-up of hands holding a handgun against an uncluttered background.
-Local MPS inference at the default thresholds detected one person and one
+The previous automatic weapon-scan workflow, at default thresholds on MPS, detected one person and one
 weapon candidate, with score 0.394. Grounding DINO returned the combined label
 `handgun rifle shotgun`, so this demonstrates localization, not reliable subtype
 classification. This is a single-image check, not an accuracy benchmark.
 
-Run: uv run python demo.py --image sample_images/handgun_easy.jpg --offline --device mps
+Run: uv run python demo.py "Look for a handgun." --image sample_images/handgun_easy.jpg --device mps
+The current workflow searches only when Claude requests the DINO tool.
 
 ## Original parking example: parking.jpg
 
@@ -71,6 +72,6 @@ Downloaded unchanged for local testing. Source credits WPVI-TV; no open
 redistribution license has been established.
 
 Run: uv run python demo.py --image sample_images/cctv_carjacking.jpg
-Capacity is unknown. The app detects vehicles and people; it has no firearm
-class or crime-classification node. Person descriptions depend on the visible
-content of each crop and may miss small or obscured objects.
+Capacity is unknown. YOLO reports vehicle and person counts first. Ask a follow-up
+question to search for other objects with the local Grounding DINO tool. Small or
+obscured objects in this CCTV still may be missed. No automatic weapon scan runs.
