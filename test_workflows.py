@@ -19,6 +19,9 @@ def detector_result(labels):
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
+        dino = patch('weapons.predict_weapons', return_value=[])
+        self.dino = dino.start()
+        self.addCleanup(dino.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.image = Path(self.directory.name) / 'parking.png'
@@ -37,13 +40,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(graph['occupancy'], 84)
         self.assertEqual(len(graph['detections']), 43)
         self.assertEqual(graph['detections'][0], {'label': 'car', 'confidence': 0.94, 'xyxy': [1, 2, 3, 4]})
-        self.assertEqual(len(graph['trace']), 4)
+        self.assertEqual(len(graph['trace']), 5)
         self.assertEqual(state['counts'], {})
         self.assertEqual(state['trace'], [])
         self.assertIsInstance(load.return_value.predict.call_args.kwargs['source'], Image.Image)
 
     @patch('steps.load_yolo')
-    @patch('claude.ChatAnthropic')
+    @patch('claude.Anthropic')
     def test_zero_detections_offline(self, claude, load):
         load.return_value.predict.return_value = [detector_result([])]
         result = run(self.state())
@@ -62,7 +65,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(load.return_value.predict.call_args.kwargs['conf'], 0.5)
 
     @patch('steps.load_yolo')
-    @patch('claude.ChatAnthropic')
+    @patch('claude.Anthropic')
     def test_people_only_offline_have_zero_vehicle_occupancy(self, claude, load):
         load.return_value.predict.return_value = [detector_result([4, 4])]
         result = run(self.state())
@@ -100,7 +103,7 @@ class WorkflowTests(unittest.TestCase):
             initial_state('count', self.image.parent / 'missing.png', 50)
 
     @patch('steps.load_yolo')
-    @patch('claude.ChatAnthropic')
+    @patch('claude.Anthropic')
     def test_corrupt_image_stops_before_detector_or_claude(self, claude, load):
         self.image.write_bytes(b'not an image')
         state = self.state()
@@ -111,7 +114,7 @@ class WorkflowTests(unittest.TestCase):
         claude.assert_not_called()
 
     @patch('steps.load_yolo')
-    @patch('claude.ChatAnthropic')
+    @patch('claude.Anthropic')
     def test_inference_failure_does_not_call_claude(self, claude, load):
         load.return_value.predict.side_effect = OSError('bad weights')
         state = self.state()

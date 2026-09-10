@@ -1,5 +1,7 @@
 """LangGraph orchestrates local detection, calculation, and Claude explanation."""
 
+from weapons import detect_weapons
+
 from langgraph.graph import END, START, StateGraph
 from steps import State, calculate_occupancy, describe_detections, detect_objects, explain
 
@@ -7,11 +9,13 @@ from steps import State, calculate_occupancy, describe_detections, detect_object
 def build_graph():
     builder = StateGraph(State)
     builder.add_node('detect', detect_objects)
+    builder.add_node('detect_weapons', detect_weapons)
     builder.add_node('describe_detections', describe_detections)
     builder.add_node('calculate', calculate_occupancy)
     builder.add_node('explain', explain)
     builder.add_edge(START, 'detect')
-    builder.add_edge('detect', 'describe_detections')
+    builder.add_edge('detect', 'detect_weapons')
+    builder.add_edge('detect_weapons', 'describe_detections')
     builder.add_edge('describe_detections', 'calculate')
     builder.add_edge('calculate', 'explain')
     builder.add_edge('explain', END)

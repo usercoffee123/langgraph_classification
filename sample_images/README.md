@@ -1,5 +1,24 @@
 # Sample parking-lot image
 
+## Clear weapon example: handgun_easy.jpg
+
+Man Aiming S&W SD9, by Noah Wulf, 12 January 2019.
+Source: https://commons.wikimedia.org/wiki/File:Man_Aiming_S%26W_SD9.jpg
+Original: https://upload.wikimedia.org/wikipedia/commons/f/f5/Man_Aiming_S%26W_SD9.jpg
+License: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0),
+https://creativecommons.org/licenses/by-sa/4.0/
+Downloaded unchanged (4272 x 2848 pixels).
+
+A close-up of hands holding a handgun against an uncluttered background.
+Local MPS inference at the default thresholds detected one person and one
+weapon candidate, with score 0.394. Grounding DINO returned the combined label
+`handgun rifle shotgun`, so this demonstrates localization, not reliable subtype
+classification. This is a single-image check, not an accuracy benchmark.
+
+Run: uv run python demo.py --image sample_images/handgun_easy.jpg --offline --device mps
+
+## Original parking example: parking.jpg
+
 `parking.jpg`: Parking lot at HAA Kobe, by Laitr Keiows (9 January 2010).
 
 Source: https://commons.wikimedia.org/wiki/File:Parking_lot_at_HAA_Kobe.jpg

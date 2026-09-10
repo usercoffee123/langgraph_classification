@@ -6,6 +6,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
 
+from weapons import DEFAULT_DINO_MODEL
+from devices import resolve_device
+
 VEHICLE_CLASSES = ('car', 'truck', 'bus', 'motorcycle')
 DETECTION_CLASSES = (*VEHICLE_CLASSES, 'person')
 DESCRIPTION_CLASSES = ('car', 'person')
@@ -30,8 +33,13 @@ class State(TypedDict):
     image_path: str
     parking_capacity: int | None
     yolo_model: str
+    device: str
     confidence: float
     sharpen_crops: bool
+    dino_model: str
+    weapon_threshold: float
+    weapon_text_threshold: float
+    weapon_detections: list[Detection]
     detections: list[Detection]
     counts: dict[str, int]
     descriptions: list[ObjectDescription]
@@ -46,21 +54,32 @@ class State(TypedDict):
 def initial_state(question: str, image_path: str | Path, parking_capacity: int | None = None, *,
                   use_llm: bool = True, model: str = 'claude-sonnet-4-6',
                   yolo_model: str = 'yolo26x.pt', confidence: float = 0.25,
-                  sharpen_crops: bool = False) -> State:
+                  sharpen_crops: bool = False, dino_model: str = DEFAULT_DINO_MODEL,
+                  weapon_threshold: float = 0.35, weapon_text_threshold: float = 0.25,
+                  device: str = 'auto') -> State:
+    if device not in {'auto', 'mps', 'cuda', 'cpu'}:
+        raise ValueError('Device must be auto, mps, cuda, or cpu.')
     if not question.strip():
         raise ValueError('Enter a nonempty question.')
     if parking_capacity is not None and (isinstance(parking_capacity, bool) or not isinstance(parking_capacity, int) or parking_capacity < 1):
         raise ValueError('Parking capacity must be a positive integer.')
     if not 0 < confidence <= 1:
         raise ValueError('Confidence must be greater than 0 and at most 1.')
+    for value in (weapon_threshold, weapon_text_threshold):
+        if isinstance(value, bool) or not 0 < value <= 1:
+            raise ValueError('Weapon thresholds must be greater than 0 and at most 1.')
+    if not dino_model.strip():
+        raise ValueError('Provide a Grounding DINO model ID or local directory.')
     path = Path(image_path).expanduser().resolve()
     if not path.is_file():
         raise ValueError(f'Image file does not exist: {path}')
     if path.suffix.lower() not in {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}:
         raise ValueError('Provide a local JPG, PNG, BMP, WebP, or TIFF image.')
     return State(question=question.strip(), image_path=str(path), parking_capacity=parking_capacity,
-                 yolo_model=yolo_model, confidence=confidence, sharpen_crops=sharpen_crops, detections=[], counts={}, descriptions=[],
-                 total=0, occupancy=None, answer='', trace=[], use_llm=use_llm, model=model)
+                 yolo_model=yolo_model, device=device, confidence=confidence, sharpen_crops=sharpen_crops, detections=[], counts={}, descriptions=[],
+                 total=0, occupancy=None, answer='', trace=[], use_llm=use_llm, model=model,
+                 dino_model=dino_model, weapon_threshold=weapon_threshold,
+                 weapon_text_threshold=weapon_text_threshold, weapon_detections=[])
 
 
 @lru_cache(maxsize=2)
@@ -77,7 +96,8 @@ def detect_objects(state: State) -> dict:
         with Image.open(state['image_path']) as source:
             image = ImageOps.exif_transpose(source).convert('RGB')
         yolo = load_yolo(state['yolo_model'])
-        results = yolo.predict(source=image, conf=state['confidence'], verbose=False, save=False)
+        device = resolve_device(state.get('device', 'auto'))
+        results = yolo.predict(source=image, conf=state['confidence'], verbose=False, save=False, device=device)
         result = results[0]
         if result.boxes is None:
             raise ValueError('The selected model does not return detection boxes.')
@@ -93,7 +113,7 @@ def detect_objects(state: State) -> dict:
     except Exception as error:
         raise RuntimeError(f'Local YOLO detection failed: {error}') from error
     return {'detections': detections, 'counts': counts,
-            'trace': [*state['trace'], f'YOLO: detected {sum(counts.values())} vehicle/person detection(s) locally']}
+            'trace': [*state['trace'], f'YOLO ({device}): detected {sum(counts.values())} vehicle/person detection(s) locally']}
 
 
 def describe_detections(state: State) -> dict:
@@ -169,6 +189,10 @@ def statistics(state: State) -> dict:
         {'label': item['label'], 'object_id': item['object_id'], 'description': item['description']}
         for item in state['descriptions']
     ]
+    evidence['weapon_candidates'] = [
+        {'label': item['label'], 'confidence': item['confidence']}
+        for item in state['weapon_detections']
+    ]
     return evidence
 
 
@@ -200,4 +224,15 @@ def explain(state: State) -> dict:
                 text += f'\n\n{heading}:\n' + '\n'.join(details)
             elif label == 'person' and state['counts'].get('person', 0) == 0:
                 text += '\n\nPeople descriptions:\nNo people detected.'
+    text += '\n\nGrounding DINO weapon candidates:\n'
+    if state['weapon_detections']:
+        text += '\n'.join(
+            f"Candidate {index}: {item['label']} (score {item['confidence']:.3f}), box {item['xyxy']}"
+            for index, item in enumerate(state['weapon_detections'], 1)
+        )
+    else:
+        text += 'No weapon candidates above the configured thresholds.'
+    text += ('\nThese are unverified model matches, not confirmed weapons or calibrated probabilities. '
+             'Missed detections are possible; no detections does not establish that anyone is unarmed. '
+             'Candidates are not assigned to people.')
     return {'answer': text, 'trace': [*state['trace'], event]}

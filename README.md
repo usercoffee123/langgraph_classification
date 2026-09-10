@@ -3,7 +3,7 @@
 Run commands from this repository root. A single LangGraph workflow processes a local image:
 
 ```text
-START → detect → describe_detections → calculate → explain → END
+START → detect → detect_weapons → describe_detections → calculate → explain → END
 ```
 
 YOLO records vehicle and person classes, confidence scores, and bounding boxes locally.
@@ -33,11 +33,14 @@ uv sync
 uv run python demo.py --image sample_images/parking_easy.jpg
 ```
 
-The default question asks for both cars and people. Results include a separate
-people-description section with clothing, colors, posture, visible activity, and
-a gun-visibility assessment: "Gun visible", "Possible gun / unclear", or
-"No gun visible in this crop". These are Claude's visual descriptions, not a
-validated firearm detector. Hidden objects and details outside a crop are unknown.
+The default question asks for both cars and people. Grounding DINO scans the full
+image locally for handgun, rifle, shotgun, and knife candidates in its own
+`detect_weapons` graph node. Output includes candidate labels, scores, and pixel
+boxes. These are unverified matches; scores are not calibrated probabilities.
+No candidates does not establish that weapons are absent. Candidates are not
+assigned to people. Claude describes clothing, posture, and visible activity;
+it no longer produces per-person gun-visibility verdicts.
+
 For a simple example with **2 cars and 4 people**, all detected by YOLO26x at the
 default settings:
 
@@ -69,17 +72,56 @@ uv run python demo.py --image /path/to/parking.jpg --capacity 50
 not a verified measurement of occupied spaces. With no capacity, occupancy is
 reported as unknown. Ratios over 100% are flagged rather than clamped.
 
-The first online run downloads `yolo26x.pt` if needed. `--yolo-model` selects
+The first online run downloads `yolo26x.pt` and
+`IDEA-Research/grounding-dino-tiny` model/processor files if needed. `--yolo-model` selects
 other detection weights, `--confidence` changes the default 0.25 threshold, and
 `--model` overrides the Claude model. Inputs must be local JPG, PNG, BMP, WebP,
 or TIFF images. There is no browser upload interface.
 
 To run the graph with a local statistical summary and no Claude request, use
-existing local weights:
+existing local YOLO weights and cached Grounding DINO files:
 
 ```sh
 uv run python demo.py --image sample_images/parking_easy.jpg --offline --yolo-model ./yolo26x.pt
 ```
+
+## Weapon detection configuration
+
+```sh
+uv run python demo.py --image sample_images/cctv_carjacking.jpg --weapon-threshold 0.35 --weapon-text-threshold 0.25
+```
+
+`--dino-model` selects a compatible Grounding DINO Hugging Face model ID or a
+local directory containing model and processor files. Both local detectors use
+`--device auto` by default: Apple GPU (MPS) when available, then CUDA, then CPU.
+The selected device is printed before inference. Use `--device mps` to require
+your Mac GPU, or `--device cpu` to explicitly run on the CPU.
+
+On an Apple Silicon Mac, run entirely locally with cached model files:
+
+```sh
+uv sync
+uv run python demo.py --image sample_images/cars_and_people.jpg --offline --device mps
+```
+
+This runs YOLO and Grounding DINO locally without an API key. Offline output
+contains detection statistics and weapon candidates; car/person descriptions
+still require Claude. Omit `--offline` to enable Claude using `ANTHROPIC_API_KEY`.
+Offline runs require both models to have been downloaded already.
+
+MPS uses PyTorch's [Apple GPU backend](https://docs.pytorch.org/docs/stable/notes/mps.html).
+Detection uses the EXIF-oriented full image, independently of YOLO's results.
+Boxes are clipped to the image; overlapping prompt matches are suppressed at
+IoU greater than 0.5. Nearby overlapping objects may be merged.
+
+`--offline` still runs both local detectors, but makes no Claude requests and
+loads Grounding DINO with `local_files_only=True`. Missing cached DINO files stop
+the run with an error; you can supply `--dino-model /path/to/local/model`.
+Lower thresholds can increase false positives; tiny or occluded objects may be
+missed. This general-purpose model has not been validated as a weapon detector
+on these sample images. Weapons do not contribute to parking occupancy.
+
+Integration reference: [Grounding DINO in Transformers](https://huggingface.co/docs/transformers/model_doc/grounding-dino).
 
 ## Optional crop sharpening
 
@@ -103,15 +145,20 @@ Filter reference: [Pillow UnsharpMask](https://pillow.readthedocs.io/en/stable/r
 ## Files
 
 - `demo.py`: command-line entry point and environment loading.
-- `graph.py`: LangGraph state graph with detect, describe_detections, calculate, and explain nodes.
+- `graph.py`: LangGraph state graph with detect, detect_weapons, describe_detections, calculate, and explain nodes.
+- `weapons.py`: local Grounding DINO loading, inference, candidate filtering, and weapon node.
 - `steps.py`: state, local detection, car/person crops, calculations, and explanation nodes.
-- `claude.py`: ChatAnthropic calls for car/person images and aggregate statistics.
+- `claude.py`: Anthropic SDK calls for car/person images and aggregate statistics.
 - `sample_images/`: sample photograph and attribution.
-- `test_workflows.py`, `test_claude.py`, `test_descriptions.py`, `test_cli.py`: graph, model-integration,
+- `test_workflows.py`, `test_claude.py`, `test_descriptions.py`, `test_cli.py`, `test_weapons.py`: graph, model-integration,
   and command-line tests.
 
-ChatAnthropic and LangChain Core provide the Claude model adapter and message
-utilities. All workflow orchestration uses LangGraph.
+All workflow orchestration uses LangGraph. Graph nodes call the Anthropic SDK
+directly for Claude; the application has no LangChain imports. LangGraph still
+installs `langchain-core` as an internal dependency.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the graph, components, shared state,
+crop processing, API payloads, offline behavior, and failure handling.
 
 ## Accuracy limitations
 
@@ -127,7 +174,7 @@ this case. The current YOLO26x default detected 29 cars at size 640 and confiden
 is unknown; do not use 50 for this sample.
 
 Claude cannot recover missing detections because it sees only detected car/person crops
-and aggregate statistics, not the full scene. Visual descriptions can also be
+and text evidence, including Grounding DINO candidates, not the full scene. Visual descriptions can also be
 wrong; the prompt asks for visible color, body style, and features without guessing
 make, model, or year for cars, or identity and sensitive traits for people.
 It is instructed not to infer crowdedness or available spaces. Reliable occupancy
@@ -141,7 +188,7 @@ boundary, or parked-versus-moving classification.
 uv run python -m unittest -v
 ```
 
-Tests run the actual LangGraph and local image decoding with mocked YOLO and
+Tests run the actual LangGraph and local image decoding with mocked YOLO, Grounding DINO, and
 Claude. They check filtering, arithmetic, unknown capacity, input validation,
 failure handling, EXIF orientation, crop bounds, car and person descriptions, and the data sent to Claude. No API key or weights are needed.
 

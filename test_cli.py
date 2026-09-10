@@ -50,6 +50,21 @@ class CLITests(unittest.TestCase):
         run.assert_called_once()
         self.assertFalse(run.call_args.args[0]['use_llm'])
 
+    @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}, clear=True)
+    @patch('demo.load_dotenv')
+    @patch('demo.run')
+    def test_weapon_options_reach_graph_state(self, run, load_env):
+        run.return_value = {'trace': [], 'answer': 'Candidates.'}
+        args = ['demo.py', '--image', str(self.image), '--dino-model', 'local-dino',
+                '--weapon-threshold', '0.5', '--weapon-text-threshold', '0.3']
+        with patch('sys.argv', args), redirect_stdout(io.StringIO()):
+            demo.main()
+        state = run.call_args.args[0]
+        self.assertEqual(state['dino_model'], 'local-dino')
+        self.assertEqual(state['weapon_threshold'], 0.5)
+        self.assertEqual(state['weapon_text_threshold'], 0.3)
+        self.assertEqual(state['weapon_detections'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

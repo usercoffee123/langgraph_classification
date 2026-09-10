@@ -1,9 +1,9 @@
 [project]
 name = "parking-lot"
 version = "0.1.0"
-description = "Analyze parking-lot images with YOLO, LangGraph, and Claude"
+description = "Analyze parking-lot images with YOLO, Grounding DINO, LangGraph, and Claude"
 requires-python = ">=3.11"
-dependencies = ["langchain-core>=1,<2", "langgraph>=1,<2", "langchain-anthropic>=1,<2", "python-dotenv>=1,<2", "ultralytics>=8.4,<9", "pillow>=12,<13"]
+dependencies = ["langgraph>=1,<2", "anthropic>=1,<2", "python-dotenv>=1,<2", "ultralytics>=8.4,<9", "pillow>=12,<13", "transformers>=5,<6", "torch>=2,<3"]
 
 [tool.uv]
 package = false
